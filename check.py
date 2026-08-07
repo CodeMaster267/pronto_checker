@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Watch pronto.bm for products coming back in stock, and email when they do.
+"""Watch pronto.bm for products coming back in stock, and push to ntfy when they do.
 
 pronto.bm is an Angular front end over the Eddress grocery platform. The
 storefront talks to a public, unauthenticated JSON API, so this only needs two
@@ -13,12 +13,9 @@ Stdlib only, by design: no pip install step in CI.
 import datetime
 import json
 import os
-import smtplib
-import ssl
 import sys
 import urllib.error
 import urllib.request
-from email.message import EmailMessage
 from pathlib import Path
 
 API_BASE = "https://prod-api.eddress.co/"
@@ -93,44 +90,59 @@ def is_available(item):
     )
 
 
-def build_email(newly_available):
-    lines = [
-        "Back in stock at Pronto:",
-        "",
-    ]
+def label_of(entry, item):
+    return (item.get("label") or entry["name"]).strip()
+
+
+def build_body(newly_available):
+    lines = []
     for entry, item in newly_available:
-        lines.append(f"  {item.get('label', entry['name']).strip()}")
-        lines.append(f"  ${item.get('price')}")
-        lines.append(f"  {STORE_URL}/product/{entry['slug']}")
-        lines.append("")
-    lines.append("-- pronto-checker")
+        lines.append(f"{label_of(entry, item)} - ${item.get('price')}")
+        lines.append(f"{STORE_URL}/product/{entry['slug']}")
     return "\n".join(lines)
 
 
-def send_email(subject, body):
-    """Send via SMTP. Returns True if sent, False if not configured."""
-    host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-    port = int(os.environ.get("SMTP_PORT", "465"))
-    user = os.environ.get("SMTP_USER")
-    password = os.environ.get("SMTP_PASS")
-    recipients = [a.strip() for a in os.environ.get("MAIL_TO", "").split(",") if a.strip()]
+def ascii_header(text):
+    """ntfy carries notification metadata in HTTP headers, which must be ASCII."""
+    return text.encode("ascii", "replace").decode("ascii")
 
-    if not (user and password and recipients):
-        print("email not configured (SMTP_USER / SMTP_PASS / MAIL_TO) - skipping send")
+
+def notify(newly_available):
+    """Push to ntfy. Returns True if sent, False if not configured."""
+    topic = os.environ.get("NTFY_TOPIC")
+    if not topic:
+        print("ntfy not configured (NTFY_TOPIC) - skipping notification")
         return False
 
-    message = EmailMessage()
-    message["Subject"] = subject
-    message["From"] = os.environ.get("MAIL_FROM", user)
-    message["To"] = ", ".join(recipients)
-    message.set_content(body)
+    server = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
+    names = ", ".join(label_of(entry, item) for entry, item in newly_available)
 
-    with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context()) as smtp:
-        smtp.login(user, password)
-        smtp.send_message(message)
+    headers = {
+        "Title": ascii_header(f"Back in stock: {names}"),
+        "Tags": "shopping_cart",
+        "Priority": "high",
+        "User-Agent": USER_AGENT,
+        "Content-Type": "text/plain; charset=utf-8",
+        # Tapping the notification opens the product page.
+        "Click": f"{STORE_URL}/product/{newly_available[0][0]['slug']}",
+    }
 
-    # Never log the addresses themselves: workflow logs are public.
-    print(f"emailed {len(recipients)} recipient(s)")
+    token = os.environ.get("NTFY_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    request = urllib.request.Request(
+        f"{server}/{topic}",
+        data=build_body(newly_available).encode(),
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        response.read()
+
+    # Never log the topic: on ntfy.sh the topic name is the only access control,
+    # and this repository's workflow logs are public.
+    print("notification sent")
     return True
 
 
@@ -178,8 +190,7 @@ def main():
             newly_available.append((entry, item))
 
     if newly_available:
-        names = ", ".join(item.get("label", e["name"]).strip() for e, item in newly_available)
-        send_email(f"Back in stock at Pronto: {names}", build_email(newly_available))
+        notify(newly_available)
     else:
         print("nothing newly available")
 

@@ -26,9 +26,7 @@ jobs:
       # so there is nothing to install.
       - name: Check stock
         env:
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          MAIL_TO: ${{ secrets.MAIL_TO }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python3 check.py
 
       - name: Commit state
