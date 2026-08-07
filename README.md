@@ -1,54 +1,65 @@
 # pronto_checker
 
-Watches [pronto.bm](https://pronto.bm) for products coming back in stock and
-sends a phone notification via [ntfy](https://ntfy.sh) when they do. Runs three
-times a day on GitHub Actions.
+Watches [pronto.bm](https://pronto.bm) for a product that **is not in the
+catalogue yet**, and sends a phone notification via [ntfy](https://ntfy.sh) the
+moment it gets listed. Runs three times a day on GitHub Actions.
+
+Currently watching for: **Lean Beef Stew - 1lb - Halal**
 
 ## How it works
 
 pronto.bm is an Angular front end over the [Eddress](https://eddress.co) grocery
 platform, and its storefront talks to a public, unauthenticated JSON API. So
-there is no scraping and no headless browser -- two HTTP calls per run:
+there is no scraping and no headless browser:
 
 1. `POST api/market/app/public/services/stores` -> the Bermuda store id
-2. `POST v1/api/searchengine/public/{tenantUid}/search` -> matching products
+2. `POST v1/api/searchengine/public/{tenantUid}/search` -> one call per query
 
-Each product carries an `outOfStock` boolean. Out-of-stock products **still
-appear in search results**, so stock is read from that flag, never from whether
-the search returned a hit.
+### Matching on words, not on an exact title
 
-`state.json` records the last known state of each product. A notification goes
-out only on the transition from unavailable to available, so a product that
-stays in stock does not buzz three phones three times a day.
+Pronto's product titles are not internally consistent:
 
-If a watched product cannot be found at all, the run fails loudly (non-zero
-exit) rather than silently reporting "not available" -- a broken watcher and an
-out-of-stock product should not look the same. The stored state is left
-untouched in that case, so a later recovery is not mistaken for a restock.
+```
+Lean Beef Stew-1lb            <- trailing space, no spaces around the dash
+Beef Stew (Frozen) 1 lb- Halal
+Ground Beef (Extra Lean) 1 lb - Halal
+Lamb Leg Steak Boneless 1lb- Halal
+```
+
+Comparing against one exact string would miss the listing over a stray dash or
+a doubled space. So a watch declares the words a title **must** contain, in any
+order, with punctuation and case ignored. Size is deliberately not a required
+word, because `1lb` and `1 lb` are both plausible.
+
+### Why every query is also a canary
+
+The watched product does not exist yet, so "no match" is the normal steady
+state -- which means a search that quietly stopped working would look exactly
+like a product that has not been listed. Nothing would ever alert.
+
+So each query is chosen to always return *something*, and **a query that
+returns nothing fails the run**. A red run means the watcher is broken, not
+that the product is missing. GitHub emails you about failed runs, which makes
+that the alarm.
+
+If any query fails, that watch's stored state is left untouched, so an
+incomplete view of the catalogue is never recorded as a disappearance.
 
 ## Configuration
 
-Products live in `watchlist.json`:
+Watches live in `watchlist.json`:
 
 | field | meaning |
 | --- | --- |
 | `key` | stable identifier used in `state.json` |
-| `name` | human-readable fallback name, used if the API label is missing |
-| `query` | search text sent to the API |
-| `product_id` | Eddress product id; the primary match |
-| `slug` | used to build the product URL |
+| `description` | what you are actually waiting for, for humans |
+| `queries` | search terms; each must always return results (canary) |
+| `require_words` | every one of these must appear in a product title to match |
 
-Matching is by `product_id` first, falling back to the label. To add a product,
-search for it and copy the `id` and `slug` out of the response:
-
-```sh
-curl -s -X POST -H 'Content-Type: application/json' \
-  -d '{"query":"beef stew","page":0,
-       "storeId":"62bc5c3f5e1f9a0685630dbf",
-       "tenantUid":"WLxcLSplRaS7A9DKkDDHMQ"}' \
-  https://prod-api.eddress.co/v1/api/searchengine/public/WLxcLSplRaS7A9DKkDDHMQ/search \
-  | python3 -m json.tool | grep -E '"(id|label|slug|outOfStock)"'
-```
+`state.json` records which matching products have been seen. A notification
+fires when a matching product is **listed for the first time**, and again if a
+known match goes from out of stock to in stock. A product that simply stays
+listed does not buzz anyone.
 
 ## Notifications
 
@@ -66,6 +77,20 @@ script deliberately never prints the topic. Keep it that way.
 
 Optional environment overrides: `NTFY_SERVER` (default `https://ntfy.sh`) and
 `NTFY_TOKEN` for a self-hosted or access-controlled server.
+
+### Testing notifications
+
+Since the real event may be months away, there is a test path that pushes a
+notification without checking anything:
+
+Actions -> Pronto stock check -> Run workflow -> tick **Send a test
+notification** -> Run workflow.
+
+Or locally:
+
+```sh
+NTFY_TOPIC=your-topic python3 check.py --test
+```
 
 ## Running locally
 

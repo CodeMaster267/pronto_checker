@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Watch pronto.bm for products coming back in stock, and push to ntfy when they do.
+"""Watch pronto.bm for a product that is not in the catalogue yet.
 
 pronto.bm is an Angular front end over the Eddress grocery platform. The
-storefront talks to a public, unauthenticated JSON API, so this only needs two
-HTTP calls and no browser. Each product carries an `outOfStock` flag, and
-out-of-stock products still appear in search results -- so stock is read from
-that flag, never from whether the search returned a hit.
+storefront talks to a public, unauthenticated JSON API, so this needs no
+browser -- one call for the store id, then a search per query.
+
+The thing being watched does not exist yet, so "no match" is the normal
+steady state, not an error. That removes the obvious breakage alarm: a search
+that silently stopped working would look exactly like a product that has not
+been listed. So every query doubles as a canary -- each one is chosen to
+always return *something*, and a query returning nothing fails the run.
+
+Matching is on required words rather than an exact title, because Pronto's
+titles are not consistent: "Lean Beef Stew-1lb ", "Beef Stew (Frozen) 1 lb-
+Halal", "Ground Beef (Extra Lean) 1 lb - Halal". Comparing against one exact
+string would miss the listing over a stray dash.
 
 Stdlib only, by design: no pip install step in CI.
 """
@@ -13,6 +22,7 @@ Stdlib only, by design: no pip install step in CI.
 import datetime
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -59,27 +69,19 @@ def get_store_id():
 def search(query, store_id):
     data = post(
         f"v1/api/searchengine/public/{TENANT_UID}/search",
-        {
-            "query": query,
-            "page": 0,
-            "storeId": store_id,
-            "tenantUid": TENANT_UID,
-        },
+        {"query": query, "page": 0, "storeId": store_id, "tenantUid": TENANT_UID},
     )
     return data.get("items") or []
 
 
-def find_product(entry, items):
-    """Match on product id, falling back to the label if the id ever changes."""
-    for item in items:
-        if item.get("id") == entry["product_id"]:
-            return item
-    wanted = entry["name"].lower().replace(" ", "").replace("-", "")
-    for item in items:
-        label = (item.get("label") or "").lower().replace(" ", "").replace("-", "")
-        if label and label == wanted:
-            return item
-    return None
+def normalize(text):
+    """Fold punctuation and case so titles compare on words alone."""
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def has_all_words(label, words):
+    haystack = normalize(label)
+    return all(re.search(rf"\b{re.escape(w.lower())}\b", haystack) for w in words)
 
 
 def is_available(item):
@@ -90,16 +92,60 @@ def is_available(item):
     )
 
 
-def label_of(entry, item):
-    return (item.get("label") or entry["name"]).strip()
+def collect(watch, store_id):
+    """Run every query for a watch and return (matches, failures).
+
+    Each query must return results. One that comes back empty means the search
+    broke, not that the shelf is bare -- see the module docstring.
+    """
+    matches = {}
+    failures = []
+
+    for query in watch["queries"]:
+        try:
+            items = search(query, store_id)
+        except (urllib.error.URLError, json.JSONDecodeError, OSError) as error:
+            failures.append(f"{watch['key']}: query {query!r} failed ({error})")
+            continue
+
+        if not items:
+            failures.append(f"{watch['key']}: query {query!r} returned nothing (canary)")
+            continue
+
+        for item in items:
+            if has_all_words(item.get("label"), watch["require_words"]):
+                matches[item["id"]] = item
+
+    return matches, failures
 
 
-def build_body(newly_available):
-    lines = []
-    for entry, item in newly_available:
-        lines.append(f"{label_of(entry, item)} - ${item.get('price')}")
-        lines.append(f"{STORE_URL}/product/{entry['slug']}")
-    return "\n".join(lines)
+def build_events(watch, matches, known):
+    """Compare this run against stored state and describe what changed."""
+    events = []
+
+    for product_id, item in matches.items():
+        previous = known.get(product_id, {})
+        available = is_available(item)
+
+        if not previous.get("listed"):
+            kind = "listed"
+        elif available and not previous.get("available"):
+            kind = "restocked"
+        else:
+            kind = None
+
+        if kind:
+            events.append(
+                {
+                    "kind": kind,
+                    "label": (item.get("label") or watch["description"]).strip(),
+                    "price": item.get("price"),
+                    "slug": item.get("slug"),
+                    "available": available,
+                }
+            )
+
+    return events
 
 
 def ascii_header(text):
@@ -107,35 +153,30 @@ def ascii_header(text):
     return text.encode("ascii", "replace").decode("ascii")
 
 
-def notify(newly_available):
-    """Push to ntfy. Returns True if sent, False if not configured."""
+def push(title, body, click=None):
+    """Send one ntfy notification. Returns True if sent, False if unconfigured."""
     topic = os.environ.get("NTFY_TOPIC")
     if not topic:
         print("ntfy not configured (NTFY_TOPIC) - skipping notification")
         return False
 
     server = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
-    names = ", ".join(label_of(entry, item) for entry, item in newly_available)
-
     headers = {
-        "Title": ascii_header(f"Back in stock: {names}"),
+        "Title": ascii_header(title),
         "Tags": "shopping_cart",
         "Priority": "high",
         "User-Agent": USER_AGENT,
         "Content-Type": "text/plain; charset=utf-8",
-        # Tapping the notification opens the product page.
-        "Click": f"{STORE_URL}/product/{newly_available[0][0]['slug']}",
     }
+    if click:
+        headers["Click"] = click
 
     token = os.environ.get("NTFY_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
     request = urllib.request.Request(
-        f"{server}/{topic}",
-        data=build_body(newly_available).encode(),
-        headers=headers,
-        method="POST",
+        f"{server}/{topic}", data=body.encode(), headers=headers, method="POST"
     )
     with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
         response.read()
@@ -146,61 +187,90 @@ def notify(newly_available):
     return True
 
 
+def notify(events):
+    lines = []
+    for event in events:
+        headline = "NOW LISTED" if event["kind"] == "listed" else "BACK IN STOCK"
+        stock = "in stock" if event["available"] else "listed but out of stock"
+        lines.append(f"{headline}: {event['label']}")
+        lines.append(f"${event['price']} - {stock}")
+        if event["slug"]:
+            lines.append(f"{STORE_URL}/product/{event['slug']}")
+
+    first = events[0]
+    verb = "Now on Pronto" if first["kind"] == "listed" else "Back in stock"
+    click = f"{STORE_URL}/product/{first['slug']}" if first["slug"] else STORE_URL
+    push(f"{verb}: {first['label']}", "\n".join(lines), click)
+
+
+def send_test():
+    sent = push(
+        "pronto-checker test",
+        "If you can read this, notifications work.\n"
+        "You will next hear from this bot when a watched product is listed.",
+        STORE_URL,
+    )
+    return 0 if sent else 1
+
+
 def main():
+    if "--test" in sys.argv:
+        sys.exit(send_test())
+
     watchlist = json.loads(WATCHLIST_FILE.read_text())
     state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
-    products = state.get("products", {})
+    watches = state.get("watches", {})
 
     store_id = get_store_id()
-    today = datetime.date.today().isoformat()
 
-    newly_available = []
+    events = []
     failures = []
 
-    for entry in watchlist:
-        key = entry["key"]
-        previous = products.get(key, {})
-        was_available = previous.get("available")
+    for watch in watchlist:
+        key = watch["key"]
+        known = watches.get(key, {}).get("products", {})
 
-        try:
-            items = search(entry["query"], store_id)
-        except (urllib.error.URLError, json.JSONDecodeError, OSError) as error:
-            failures.append(f"{key}: search failed ({error})")
+        matches, watch_failures = collect(watch, store_id)
+        failures.extend(watch_failures)
+
+        # A failed query means an incomplete view of the catalogue, so leave
+        # this watch's state alone rather than recording a false disappearance.
+        if watch_failures:
+            print(f"{key}: skipped, {len(watch_failures)} query failure(s)")
             continue
 
-        item = find_product(entry, items)
-        if item is None:
-            # Could not identify the product at all. That is a broken watcher,
-            # not an out-of-stock signal -- leave the stored state untouched so
-            # a later recovery does not look like a restock.
-            failures.append(f"{key}: not found in {len(items)} search result(s)")
-            continue
+        events.extend(build_events(watch, matches, known))
 
-        available = is_available(item)
-        print(f"{key}: available={available} price=${item.get('price')}")
+        print(f"{key}: {len(matches)} match(es) for {watch['require_words']}")
+        for item in matches.values():
+            print(f"  - {item.get('label', '').strip()!r} available={is_available(item)}")
 
-        products[key] = {
-            "available": available,
-            "label": (item.get("label") or "").strip(),
-            "price": item.get("price"),
-            "changed_on": today if available != was_available else previous.get("changed_on", today),
+        watches[key] = {
+            "products": {
+                product_id: {
+                    "label": (item.get("label") or "").strip(),
+                    "slug": item.get("slug"),
+                    "price": item.get("price"),
+                    "listed": True,
+                    "available": is_available(item),
+                }
+                for product_id, item in matches.items()
+            }
         }
 
-        if available and not was_available:
-            newly_available.append((entry, item))
-
-    if newly_available:
-        notify(newly_available)
+    if events:
+        notify(events)
     else:
-        print("nothing newly available")
+        print("no changes")
 
-    state["products"] = products
-    state["checked_on"] = today
+    state["watches"] = watches
+    state["checked_on"] = datetime.date.today().isoformat()
+    state.pop("products", None)  # drop the old stock-checker schema
     STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
 
     if failures:
         for failure in failures:
-            print(f"LOOKUP FAILED - {failure}", file=sys.stderr)
+            print(f"FAILED - {failure}", file=sys.stderr)
         sys.exit(1)
 
 
