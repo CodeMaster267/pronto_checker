@@ -1,0 +1,16 @@
+[
+  {
+    "key": "lean-beef-stew-1lb",
+    "name": "Lean Beef Stew - 1lb",
+    "query": "lean beef stew",
+    "product_id": "6704059db3ad86bfc10742af",
+    "slug": "lean-beef-stew-1lb-"
+  },
+  {
+    "key": "beef-stew-frozen-1lb-halal",
+    "name": "Beef Stew (Frozen) 1 lb - Halal",
+    "query": "beef stew halal",
+    "product_id": "64787589002eccf3c580e03a",
+    "slug": "beef-stew-frozen-1-lb-halal"
+  }
+]

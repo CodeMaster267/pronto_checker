@@ -1,0 +1,45 @@
+name: Pronto stock check
+
+on:
+  # 11:45 / 17:45 / 22:45 UTC. Bermuda is UTC-4 in winter and UTC-3 in summer,
+  # so these land at 07:45 / 13:45 / 18:45 local in winter and one hour later
+  # in summer -- always after 07:30 without needing a timezone lookup.
+  # GitHub can delay scheduled runs, but only ever later, never earlier.
+  schedule:
+    - cron: "45 11,17,22 * * *"
+  workflow_dispatch:
+
+# Needed so the job can commit state.json back to the repo.
+permissions:
+  contents: write
+
+concurrency:
+  group: pronto-check
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest ships with Python 3, and check.py is stdlib-only,
+      # so there is nothing to install.
+      - name: Check stock
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: python3 check.py
+
+      - name: Commit state
+        if: always()
+        run: |
+          if git diff --quiet -- state.json; then
+            echo "state unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git commit -m "chore: update stock state"
+          git push
