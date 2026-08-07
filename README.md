@@ -20,10 +20,10 @@ there is no scraping and no headless browser:
 Pronto's product titles are not internally consistent:
 
 ```
-Lean Beef Stew-1lb            <- trailing space, no spaces around the dash
-Beef Stew (Frozen) 1 lb- Halal
+Lean Beef Stew-1lb             <- trailing space, no spaces around the dash
+Beef Stew (Frozen) 1 lb- Halal <- space before the dash, not after
 Ground Beef (Extra Lean) 1 lb - Halal
-Lamb Leg Steak Boneless 1lb- Halal
+Lamb Leg Steak Boneless 1lb- Halal, NZ
 ```
 
 Comparing against one exact string would miss the listing over a stray dash or

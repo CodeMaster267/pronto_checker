@@ -42,6 +42,21 @@ WATCHLIST_FILE = ROOT / "watchlist.json"
 STATE_FILE = ROOT / "state.json"
 
 
+def load_watchlist():
+    """Load watchlist.json, rejecting configurations that cannot work."""
+    watchlist = json.loads(WATCHLIST_FILE.read_text())
+
+    for watch in watchlist:
+        key = watch.get("key", "<unnamed>")
+        if not watch.get("queries"):
+            raise ValueError(f"{key}: needs at least one query")
+        if not [word for word in watch.get("require_words", []) if word.strip()]:
+            # An empty requirement matches every product in the catalogue.
+            raise ValueError(f"{key}: require_words cannot be empty")
+
+    return watchlist
+
+
 def post(path, payload):
     """POST JSON to the Eddress API and return the decoded response."""
     request = urllib.request.Request(
@@ -149,8 +164,14 @@ def build_events(watch, matches, known):
 
 
 def ascii_header(text):
-    """ntfy carries notification metadata in HTTP headers, which must be ASCII."""
-    return text.encode("ascii", "replace").decode("ascii")
+    """ntfy carries notification metadata in HTTP headers: ASCII, and one line.
+
+    Collapsing whitespace first matters -- a newline in a product label would
+    otherwise raise on send, turning the one alert this bot exists for into a
+    failed run.
+    """
+    collapsed = re.sub(r"\s+", " ", text or "").strip()
+    return collapsed.encode("ascii", "replace").decode("ascii")
 
 
 def push(title, body, click=None):
@@ -200,7 +221,7 @@ def notify(events):
     first = events[0]
     verb = "Now on Pronto" if first["kind"] == "listed" else "Back in stock"
     click = f"{STORE_URL}/product/{first['slug']}" if first["slug"] else STORE_URL
-    push(f"{verb}: {first['label']}", "\n".join(lines), click)
+    return push(f"{verb}: {first['label']}", "\n".join(lines), click)
 
 
 def send_test():
@@ -217,7 +238,7 @@ def main():
     if "--test" in sys.argv:
         sys.exit(send_test())
 
-    watchlist = json.loads(WATCHLIST_FILE.read_text())
+    watchlist = load_watchlist()
     state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
     watches = state.get("watches", {})
 
@@ -259,7 +280,16 @@ def main():
         }
 
     if events:
-        notify(events)
+        # Record nothing unless the alert actually went out. Persisting first
+        # would mark the product "already seen" and silently retire the one
+        # notification this bot exists to send.
+        if not notify(events):
+            print(
+                "FAILED - notification not sent; state left unrecorded so the "
+                "next run retries",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     else:
         print("no changes")
 
