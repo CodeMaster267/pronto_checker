@@ -8,6 +8,11 @@ on:
   schedule:
     - cron: "45 11,17,22 * * *"
   workflow_dispatch:
+    inputs:
+      test_notification:
+        description: "Send a test notification instead of checking"
+        type: boolean
+        default: false
 
 # Needed so the job can commit state.json back to the repo.
 permissions:
@@ -24,10 +29,10 @@ jobs:
 
       # ubuntu-latest ships with Python 3, and check.py is stdlib-only,
       # so there is nothing to install.
-      - name: Check stock
+      - name: Check listings
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-        run: python3 check.py
+        run: python3 check.py ${{ inputs.test_notification && '--test' || '' }}
 
       - name: Commit state
         if: always()
