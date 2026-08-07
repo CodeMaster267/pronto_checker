@@ -1,7 +1,8 @@
 # pronto_checker
 
 Watches [pronto.bm](https://pronto.bm) for products coming back in stock and
-emails when they do. Runs three times a day on GitHub Actions.
+sends a phone notification via [ntfy](https://ntfy.sh) when they do. Runs three
+times a day on GitHub Actions.
 
 ## How it works
 
@@ -16,9 +17,9 @@ Each product carries an `outOfStock` boolean. Out-of-stock products **still
 appear in search results**, so stock is read from that flag, never from whether
 the search returned a hit.
 
-`state.json` records the last known state of each product. Email goes out only
-on the transition from unavailable to available, so a product that stays in
-stock does not generate three emails a day.
+`state.json` records the last known state of each product. A notification goes
+out only on the transition from unavailable to available, so a product that
+stays in stock does not buzz three phones three times a day.
 
 If a watched product cannot be found at all, the run fails loudly (non-zero
 exit) rather than silently reporting "not available" -- a broken watcher and an
@@ -32,7 +33,7 @@ Products live in `watchlist.json`:
 | field | meaning |
 | --- | --- |
 | `key` | stable identifier used in `state.json` |
-| `name` | human-readable name, used in the email |
+| `name` | human-readable fallback name, used if the API label is missing |
 | `query` | search text sent to the API |
 | `product_id` | Eddress product id; the primary match |
 | `slug` | used to build the product URL |
@@ -49,27 +50,28 @@ curl -s -X POST -H 'Content-Type: application/json' \
   | python3 -m json.tool | grep -E '"(id|label|slug|outOfStock)"'
 ```
 
-## Secrets
+## Notifications
 
-Set these under Settings -> Secrets and variables -> Actions:
+One secret, under Settings -> Secrets and variables -> Actions:
 
 | secret | value |
 | --- | --- |
-| `SMTP_USER` | Gmail address used to send |
-| `SMTP_PASS` | Gmail **app password**, not the account password |
-| `MAIL_TO` | comma-separated recipients |
+| `NTFY_TOPIC` | the ntfy topic name to publish to |
 
-Optional environment overrides: `SMTP_HOST` (default `smtp.gmail.com`),
-`SMTP_PORT` (default `465`), `MAIL_FROM` (default `SMTP_USER`).
+**On ntfy.sh the topic name is the only access control.** Anyone who knows it
+can subscribe to your notifications or publish to them, so use a long random
+name -- not `pronto` -- and keep it in the secret rather than in this file.
+This repository is public, which means **workflow logs are public too**; the
+script deliberately never prints the topic. Keep it that way.
 
-This repository is public, which means **workflow logs are public too**. The
-script logs recipient counts, never addresses. Keep it that way.
+Optional environment overrides: `NTFY_SERVER` (default `https://ntfy.sh`) and
+`NTFY_TOKEN` for a self-hosted or access-controlled server.
 
 ## Running locally
 
 ```sh
-python3 check.py                      # check only, no email
-MAIL_TO=you@example.com SMTP_USER=... SMTP_PASS=... python3 check.py
+python3 check.py                       # check only, no notification
+NTFY_TOPIC=your-topic python3 check.py # check and notify
 ```
 
 ## Schedule
