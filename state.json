@@ -1,3 +1,17 @@
 {
-  "products": {}
+  "checked_on": "2026-08-07",
+  "products": {
+    "beef-stew-frozen-1lb-halal": {
+      "available": true,
+      "changed_on": "2026-08-07",
+      "label": "Beef Stew (Frozen) 1 lb- Halal",
+      "price": 13.59
+    },
+    "lean-beef-stew-1lb": {
+      "available": true,
+      "changed_on": "2026-08-07",
+      "label": "Lean Beef Stew-1lb",
+      "price": 12.99
+    }
+  }
 }
