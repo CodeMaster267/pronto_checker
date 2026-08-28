@@ -2,7 +2,15 @@
   "checked_on": "2026-08-28",
   "watches": {
     "lean-beef-stew-halal": {
-      "products": {}
+      "products": {
+        "6704059db3ad86bfc10742af": {
+          "available": true,
+          "label": "Lean Beef Stew-1lb Halal",
+          "listed": true,
+          "price": 12.99,
+          "slug": "lean-beef-stew-1lb-halal"
+        }
+      }
     }
   }
 }
